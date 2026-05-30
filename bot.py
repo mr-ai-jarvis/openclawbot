@@ -1,5 +1,5 @@
 """
-🐕 Random Dog Bot — Telegram bot that sends random dog images.
+🐕🐱 Animal Bot — Telegram bot with random dog & cat photos + inline buttons.
 
 Deploy on Railway. Set BOT_TOKEN env var in Railway dashboard.
 """
@@ -7,8 +7,8 @@ Deploy on Railway. Set BOT_TOKEN env var in Railway dashboard.
 import os
 import logging
 import httpx
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 # Logging
 logging.basicConfig(
@@ -18,19 +18,28 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 DOG_API = "https://dog.ceo/api/breeds/image/random"
+CAT_API = "https://api.thecatapi.com/v1/images/search"
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Send a welcome message."""
+    """Send a welcome message with inline buttons."""
+    keyboard = [
+        [
+            InlineKeyboardButton("🐕 Собаку", callback_data="dog"),
+            InlineKeyboardButton("🐱 Кота", callback_data="cat"),
+        ],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
     await update.message.reply_text(
-        "🐕 Привет! Я Random Dog Bot!\n\n"
-        "Команды:\n"
-        "/dog — получить случайное фото собаки"
+        "🐾 Привет! Я Animal Bot!\n\n"
+        "Выбери, кого хочешь увидеть:",
+        reply_markup=reply_markup,
     )
 
 
 async def dog(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Fetch a random dog image and send it."""
+    """Fetch a random dog image and send it with buttons."""
     msg = await update.message.reply_text("🔍 Ищу собачку...")
 
     try:
@@ -45,11 +54,108 @@ async def dog(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         image_url = data["message"]
         await msg.delete()
-        await update.message.reply_photo(photo=image_url, caption="🐶 Лови собачку!")
+        await _send_with_buttons(update, image_url, "🐶 Лови собачку!")
 
     except Exception as e:
         logger.error(f"Dog API error: {e}")
         await msg.edit_text("😢 Ошибка при поиске собачки. Попробуй позже.")
+
+
+async def cat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Fetch a random cat image and send it with buttons."""
+    msg = await update.message.reply_text("🔍 Ищу котика...")
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(CAT_API)
+            resp.raise_for_status()
+            data = resp.json()
+
+        if not data or not data[0].get("url"):
+            await msg.edit_text("😢 Не нашёл котика. Попробуй ещё раз!")
+            return
+
+        image_url = data[0]["url"]
+        await msg.delete()
+        await _send_with_buttons(update, image_url, "🐱 Лови котика!")
+
+    except Exception as e:
+        logger.error(f"Cat API error: {e}")
+        await msg.edit_text("😢 Ошибка при поиске котика. Попробуй позже.")
+
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle inline button presses."""
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "dog":
+        msg = await query.edit_message_text("🔍 Ищу собачку...")
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(DOG_API)
+                resp.raise_for_status()
+                data = resp.json()
+
+            if data.get("status") != "success" or not data.get("message"):
+                await msg.edit_text("😢 Не нашёл собачку. Попробуй ещё раз!")
+                return
+
+            image_url = data["message"]
+            await msg.delete()
+            await query.message.reply_photo(
+                photo=image_url,
+                caption="🐶 Лови собачку!",
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton("🐕 Ещё собаку", callback_data="dog"),
+                        InlineKeyboardButton("🐱 Кота", callback_data="cat"),
+                    ],
+                ]),
+            )
+        except Exception as e:
+            logger.error(f"Dog API error: {e}")
+            await msg.edit_text("😢 Ошибка. Попробуй позже.")
+
+    elif query.data == "cat":
+        msg = await query.edit_message_text("🔍 Ищу котика...")
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(CAT_API)
+                resp.raise_for_status()
+                data = resp.json()
+
+            if not data or not data[0].get("url"):
+                await msg.edit_text("😢 Не нашёл котика. Попробуй ещё раз!")
+                return
+
+            image_url = data[0]["url"]
+            await msg.delete()
+            await query.message.reply_photo(
+                photo=image_url,
+                caption="🐱 Лови котика!",
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton("🐕 Собаку", callback_data="dog"),
+                        InlineKeyboardButton("🐱 Ещё кота", callback_data="cat"),
+                    ],
+                ]),
+            )
+        except Exception as e:
+            logger.error(f"Cat API error: {e}")
+            await msg.edit_text("😢 Ошибка. Попробуй позже.")
+
+
+async def _send_with_buttons(update: Update, photo_url: str, caption: str) -> None:
+    """Helper: send a photo with inline buttons below."""
+    keyboard = [
+        [
+            InlineKeyboardButton("🐕 Собаку", callback_data="dog"),
+            InlineKeyboardButton("🐱 Кота", callback_data="cat"),
+        ],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_photo(photo=photo_url, caption=caption, reply_markup=reply_markup)
 
 
 def main() -> None:
@@ -62,8 +168,10 @@ def main() -> None:
     app = Application.builder().token(token).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("dog", dog))
+    app.add_handler(CommandHandler("cat", cat))
+    app.add_handler(CallbackQueryHandler(button_handler))
 
-    logger.info("🐕 Bot is running...")
+    logger.info("🐾 Bot is running...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
