@@ -100,8 +100,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     query = update.callback_query
     await query.answer()
 
+    # Delete old photo first so we can show a clean new one
+    await query.message.delete()
+
     if query.data == "dog":
-        msg = await query.edit_message_text("🔍 Ищу собачку...")
+        msg = await query.message.reply_text("🔍 Ищу собачку...")
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.get(DOG_API)
@@ -129,7 +132,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await msg.edit_text("😢 Ошибка. Попробуй позже.")
 
     elif query.data == "cat":
-        msg = await query.edit_message_text("🔍 Ищу котика...")
+        msg = await query.message.reply_text("🔍 Ищу котика...")
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.get(CAT_API)
