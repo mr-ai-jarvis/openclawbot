@@ -1,229 +1,133 @@
 """
-🐕🐱 Animal Bot — Telegram bot with random dog & cat photos + inline buttons.
+🤖 Personal Assistant Bot — forwards messages from users to the owner.
 
-Deploy on Railway. Set BOT_TOKEN env var in Railway dashboard.
+Deploy on Railway. Set BOT_TOKEN env var.
 """
 
 import os
+import json
 import logging
-import httpx
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from pathlib import Path
+from telegram import Update
+from telegram.ext import Application, MessageHandler, filters, ContextTypes
 
-# Logging
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
 
-DOG_API = "https://dog.ceo/api/breeds/image/random"
-CAT_API = "https://api.thecatapi.com/v1/images/search"
-IMAGINE_BASE = "https://image.pollinations.ai/prompt"
-
-# Allowed image generation models (Pollinations.ai)
-IMAGINE_MODELS = {
-    "flux": "FLUX (best quality)",
-    "turbo": "Turbo (fast)",
-    "flux-realism": "FLUX Realism (photorealistic)",
-    "any-dark": "Dark fantasy",
-}
+# Owner's Telegram ID (hardcoded for security — only Игорь gets these)
+OWNER_ID = 6023070081
+MAPPING_FILE = Path("user_mapping.json")
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Send a welcome message with inline buttons."""
-    keyboard = [
-        [
-            InlineKeyboardButton("🐕 Собаку", callback_data="dog"),
-            InlineKeyboardButton("🐱 Кота", callback_data="cat"),
-        ],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    await update.message.reply_text(
-        "🐾 Привет! Я Animal Bot!\n\n"
-        "Выбери, кого хочешь увидеть:\n\n"
-        "🎨 Ещё могу нарисовать что угодно —\n"
-        "напиши /imagine твой запрос",
-        reply_markup=reply_markup,
-    )
+def load_mapping() -> dict:
+    """Load user mapping (forwarded_msg_id -> user chat_id)."""
+    if MAPPING_FILE.exists():
+        return json.loads(MAPPING_FILE.read_text())
+    return {}
 
 
-async def dog(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Fetch a random dog image and send it with buttons."""
-    msg = await update.message.reply_text("🔍 Ищу собачку...")
-
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(DOG_API)
-            resp.raise_for_status()
-            data = resp.json()
-
-        if data.get("status") != "success" or not data.get("message"):
-            await msg.edit_text("😢 Не нашёл собачку. Попробуй ещё раз!")
-            return
-
-        image_url = data["message"]
-        await msg.delete()
-        await _send_with_buttons(update, image_url, "🐶 Лови собачку!")
-
-    except Exception as e:
-        logger.error(f"Dog API error: {e}")
-        await msg.edit_text("😢 Ошибка при поиске собачки. Попробуй позже.")
+def save_mapping(mapping: dict) -> None:
+    """Save user mapping to disk."""
+    MAPPING_FILE.write_text(json.dumps(mapping, indent=2))
 
 
-async def cat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Fetch a random cat image and send it with buttons."""
-    msg = await update.message.reply_text("🔍 Ищу котика...")
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Route messages: users → owner, owner replies → user."""
+    user = update.effective_user
+    chat_id = update.effective_chat.id
 
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(CAT_API)
-            resp.raise_for_status()
-            data = resp.json()
+    if chat_id == OWNER_ID:
+        # ── Owner is sending a message ──────────────────────────
+        reply = update.message.reply_to_message
+        if reply and reply.message_id:
+            mapping = load_mapping()
+            target_user_id = mapping.get(str(reply.message_id))
+            if target_user_id:
+                # Forward owner's reply to the original user
+                text = update.message.text or update.message.caption or ""
+                if text:
+                    await context.bot.send_message(
+                        chat_id=target_user_id,
+                        text=f"📩 Ответ от Игоря:\n\n{text}",
+                    )
+                elif update.message.photo:
+                    await context.bot.send_photo(
+                        chat_id=target_user_id,
+                        photo=update.message.photo[-1].file_id,
+                        caption=f"📩 Ответ от Игоря: {update.message.caption or ''}",
+                    )
+                else:
+                    await update.message.reply_text("❌ Такой тип сообщения пока не поддерживается для ответа.")
+                    return
 
-        if not data or not data[0].get("url"):
-            await msg.edit_text("😢 Не нашёл котика. Попробуй ещё раз!")
-            return
-
-        image_url = data[0]["url"]
-        await msg.delete()
-        await _send_with_buttons(update, image_url, "🐱 Лови котика!")
-
-    except Exception as e:
-        logger.error(f"Cat API error: {e}")
-        await msg.edit_text("😢 Ошибка при поиске котика. Попробуй позже.")
-
-
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle inline button presses."""
-    query = update.callback_query
-    await query.answer()
-
-    # Delete old photo first so we can show a clean new one
-    await query.message.delete()
-
-    if query.data == "dog":
-        msg = await query.message.reply_text("🔍 Ищу собачку...")
-        try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.get(DOG_API)
-                resp.raise_for_status()
-                data = resp.json()
-
-            if data.get("status") != "success" or not data.get("message"):
-                await msg.edit_text("😢 Не нашёл собачку. Попробуй ещё раз!")
+                await update.message.reply_text("✅ Ответ отправлен пользователю!")
                 return
 
-            image_url = data["message"]
-            await msg.delete()
-            await query.message.reply_photo(
-                photo=image_url,
-                caption="🐶 Лови собачку!",
-                reply_markup=InlineKeyboardMarkup([
-                    [
-                        InlineKeyboardButton("🐕 Ещё собаку", callback_data="dog"),
-                        InlineKeyboardButton("🐱 Кота", callback_data="cat"),
-                    ],
-                ]),
-            )
-        except Exception as e:
-            logger.error(f"Dog API error: {e}")
-            await msg.edit_text("😢 Ошибка. Попробуй позже.")
-
-    elif query.data == "cat":
-        msg = await query.message.reply_text("🔍 Ищу котика...")
-        try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.get(CAT_API)
-                resp.raise_for_status()
-                data = resp.json()
-
-            if not data or not data[0].get("url"):
-                await msg.edit_text("😢 Не нашёл котика. Попробуй ещё раз!")
-                return
-
-            image_url = data[0]["url"]
-            await msg.delete()
-            await query.message.reply_photo(
-                photo=image_url,
-                caption="🐱 Лови котика!",
-                reply_markup=InlineKeyboardMarkup([
-                    [
-                        InlineKeyboardButton("🐕 Собаку", callback_data="dog"),
-                        InlineKeyboardButton("🐱 Ещё кота", callback_data="cat"),
-                    ],
-                ]),
-            )
-        except Exception as e:
-            logger.error(f"Cat API error: {e}")
-            await msg.edit_text("😢 Ошибка. Попробуй позже.")
-
-
-async def imagine(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Generate an image from text prompt via Pollinations.ai."""
-    prompt = " ".join(context.args)
-    if not prompt:
         await update.message.reply_text(
-            "🎨 Напиши запрос после команды.\n\n"
-            "Пример: /imagine рыцарь на драконе\n\n"
-            "Можно указать модель в конце: /imagine кот в скафандре flux\n"
-            "Доступные модели: " + ", ".join(IMAGINE_MODELS.keys())
+            "👋 Привет, Игорь!\n\n"
+            "Все сообщения от пользователей пересылаются сюда.\n"
+            "Чтобы ответить — просто ответь на пересланное сообщение."
         )
-        return
 
-    msg = await update.message.reply_text("🎨 Генерирую изображение...")
+    else:
+        # ── A user is sending a message ─────────────────────────
+        user_info = f"@{user.username}" if user.username else user.full_name
+        display_name = f"{user.full_name} (@{user.username})" if user.username else user.full_name
 
-    # Check if last word is a known model
-    words = prompt.rsplit(None, 1)
-    model = "flux"
-    text = prompt
-    if len(words) == 2 and words[1].lower() in IMAGINE_MODELS:
-        model = words[1].lower()
-        text = words[0]
+        # Forward message to owner
+        text = update.message.text or update.message.caption or ""
+        forwarded = None
 
-    try:
-        import urllib.parse
-        encoded = urllib.parse.quote(text)
-        image_url = f"{IMAGINE_BASE}/{encoded}?width=1024&height=1024&model={model}&nologo=true"
+        if text:
+            forwarded = await context.bot.send_message(
+                chat_id=OWNER_ID,
+                text=f"📨 От: {display_name} [ID: {chat_id}]\n\n{text}",
+            )
+        elif update.message.photo:
+            caption = update.message.caption or ""
+            forwarded = await context.bot.send_photo(
+                chat_id=OWNER_ID,
+                photo=update.message.photo[-1].file_id,
+                caption=f"📨 Фото от: {display_name} [ID: {chat_id}]\n{caption}",
+            )
+        elif update.message.voice:
+            forwarded = await context.bot.send_message(
+                chat_id=OWNER_ID,
+                text=f"📨 Голосовое от: {display_name} [ID: {chat_id}]",
+            )
+        else:
+            await update.message.reply_text(
+                "🤖 Этот бот — личный ассистент Игоря. "
+                "Ваше сообщение не поддерживается, попробуйте текст или фото."
+            )
+            return
 
-        await msg.delete()
-        await update.message.reply_photo(
-            photo=image_url,
-            caption=f"🎨 {text}\n🤖 Модель: {IMAGINE_MODELS.get(model, model)}",
+        # Store mapping so owner can reply
+        if forwarded:
+            mapping = load_mapping()
+            mapping[str(forwarded.message_id)] = chat_id
+            save_mapping(mapping)
+
+        await update.message.reply_text(
+            f"✅ Сообщение отправлено Игорю! Он ответит вам в ближайшее время."
         )
-    except Exception as e:
-        logger.error(f"Image generation error: {e}")
-        await msg.edit_text("😢 Ошибка при генерации. Попробуй другой запрос.")
-
-
-async def _send_with_buttons(update: Update, photo_url: str, caption: str) -> None:
-    """Helper: send a photo with inline buttons below."""
-    keyboard = [
-        [
-            InlineKeyboardButton("🐕 Собаку", callback_data="dog"),
-            InlineKeyboardButton("🐱 Кота", callback_data="cat"),
-        ],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_photo(photo=photo_url, caption=caption, reply_markup=reply_markup)
+        logger.info(f"Message from {chat_id} ({display_name}) → forwarded to owner")
 
 
 def main() -> None:
     """Start the bot."""
     token = os.environ.get("BOT_TOKEN")
     if not token:
-        logger.error("BOT_TOKEN environment variable is not set!")
+        logger.error("BOT_TOKEN is not set!")
         return
 
     app = Application.builder().token(token).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("dog", dog))
-    app.add_handler(CommandHandler("cat", cat))
-    app.add_handler(CommandHandler("imagine", imagine))
-    app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
 
-    logger.info("🐾 Bot is running...")
+    logger.info("🤖 Assistant bot is running...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
